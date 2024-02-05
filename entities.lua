@@ -5,46 +5,6 @@ script.on_init(function()
     global.rng = game.create_random_generator()
 end)
 
-function inputs_are_unchanged(entry)
-	-- Try to short-circuit if the selector setting is count-inputs or stack-size.
-	-- select-input cannot be handled this way, because it needs to see red and green wires separately
-	local mode = entry.settings.mode
-	if mode ~= 'count-inputs' and mode ~= 'stack-size' then
-		return false
-	end
-
-	local signals = entry.input.get_merged_signals(defines.circuit_connector_id.combinator_input)
-
-	if signals == nil then
-		if #entry.previous_signals == 0 then
-			return true
-		else
-			entry.previous_signals = {}
-			return false
-		end
-	end
-
-	if #signals ~= #entry.previous_signals then
-		entry.previous_signals = {}
-		for i = 1, #signals do
-			entry.previous_signals[i] = { name = signals[i].signal.name }
-		end
-		return false
-	end
-
-	local inputs_match = true
-
-	for i = 1, #signals do
-		local signal = signals[i]
-		if entry.previous_signals[i].name ~= signal.signal.name then
-			entry.previous_signals[i] = { name = signal.signal.name }
-			inputs_match = false
-		end
-	end
-
-	return inputs_match
-end
-
 local function get_wire(entity, wire)
     local network = entity.get_circuit_network(wire, defines.circuit_connector_id.combinator_input)
     if network then
@@ -85,6 +45,8 @@ local function on_built(e)
         input = input,
         output = output,
         cb = output.get_or_create_control_behavior(),
+
+        previous_signals = {},
 
         settings = {
             mode = "select-input",
@@ -208,17 +170,47 @@ SORTS = {
     function(a, b) return b.count > a.count end
 }
 
+local function inputs_are_unchanged(entry)
+	-- Try to short-circuit if the selector setting is count-inputs or stack-size.
+	-- select-input cannot be handled this way, because it needs to see red and green wires separately
+	local signals = entry.input.get_merged_signals(defines.circuit_connector_id.combinator_input)
+
+	if signals == nil then
+		if #entry.previous_signals == 0 then
+			return true
+		else
+			entry.previous_signals = {}
+			return false
+		end
+	end
+
+	if #signals ~= #entry.previous_signals then
+		entry.previous_signals = {}
+		for i = 1, #signals do
+			entry.previous_signals[i] = { name = signals[i].signal.name }
+		end
+		return false
+	end
+
+	local inputs_match = true
+
+	for i = 1, #signals do
+		local signal = signals[i]
+		if entry.previous_signals[i].name ~= signal.signal.name then
+			entry.previous_signals[i] = { name = signal.signal.name }
+			inputs_match = false
+		end
+	end
+
+	return inputs_match
+end
+
 local function update_single_entry(entry)
     if not entry.output.valid then
         return
     end
 
     local settings = entry.settings
-
-    -- hacky initialization
-    if entry.previous_signals == nil then
-        entry.previous_signals = {}
-    end
 
     -- short circuit for tick
     if settings.mode == 'random-input' then
@@ -227,8 +219,8 @@ local function update_single_entry(entry)
         elseif game.tick % settings.update_interval_ticks ~= 0 then
             return
         end
-    elseif inputs_are_unchanged(entry) then
-         return
+    elseif (settings.mode == 'count-inputs' or settings.mode == 'stack-size') and inputs_are_unchanged(entry) then
+        return
     end
 
     local signals
@@ -283,11 +275,7 @@ local function update_single_entry(entry)
         }}
     elseif mode == 'count-inputs' then
         signals = entry.input.get_merged_signals(defines.circuit_connector_id.combinator_input)
-        if signals == nil then
-            entry.cb.parameters = nil
-            return
-        end
-        if settings.count_signal == nil then
+        if signals == nil or settings.count_signal == nil then
             entry.cb.parameters = nil
         else
             entry.cb.parameters = {{
@@ -319,7 +307,7 @@ local function update_single_entry(entry)
         local signal = signals[global.rng(#signals)]
 
         -- if random_unique is set, do we need to re-run the rng?
-        if settings.random_unique and #entry.previous_signals ~= 0 --[[ and entry.previous_signals[1] --]] then
+        if settings.random_unique and #entry.previous_signals ~= 0 then
             local previous = entry.previous_signals[1].signal
             while signal.signal.name == previous.name and signal.signal.type == previous.type do
                 signal = signals[global.rng(#signals)]
