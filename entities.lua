@@ -6,43 +6,43 @@ script.on_init(function()
 end)
 
 function inputs_are_unchanged(entry)
-    -- Try to short-circuit if the selector setting is count-inputs or stack-size.
-    -- select-input cannot be handled this way, because it needs to see red and green wires separately
-    local mode = entry.settings.mode
-    if mode ~= 'count-inputs' and mode ~= 'stack-size' then
-        return false
-    end
+	-- Try to short-circuit if the selector setting is count-inputs or stack-size.
+	-- select-input cannot be handled this way, because it needs to see red and green wires separately
+	local mode = entry.settings.mode
+	if mode ~= 'count-inputs' and mode ~= 'stack-size' then
+		return false
+	end
 
-    local signals = entry.input.get_merged_signals(defines.circuit_connector_id.combinator_input)
+	local signals = entry.input.get_merged_signals(defines.circuit_connector_id.combinator_input)
 
-    if signals == nil then
-        if #entry.previous_signals == 0 then
-            return true
-        else
-            entry.previous_signals = {}
-            return false
-        end
-    end
+	if signals == nil then
+		if #entry.previous_signals == 0 then
+			return true
+		else
+			entry.previous_signals = {}
+			return false
+		end
+	end
 
-    if #signals ~= #entry.previous_signals then
-        entry.previous_signals = {}
-        for i = 1, #signals do
-            entry.previous_signals[i] = { name = signals[i].signal.name }
-        end
-        return false
-    end
+	if #signals ~= #entry.previous_signals then
+		entry.previous_signals = {}
+		for i = 1, #signals do
+			entry.previous_signals[i] = { name = signals[i].signal.name }
+		end
+		return false
+	end
 
-    local inputs_match = true
+	local inputs_match = true
 
-    for i = 1, #signals do
-        local signal = signals[i]
-        if entry.previous_signals[i].name ~= signal.signal.name then
-            entry.previous_signals[i] = { name = signal.signal.name }
-            inputs_match = false
-        end
-    end
+	for i = 1, #signals do
+		local signal = signals[i]
+		if entry.previous_signals[i].name ~= signal.signal.name then
+			entry.previous_signals[i] = { name = signal.signal.name }
+			inputs_match = false
+		end
+	end
 
-    return inputs_match
+	return inputs_match
 end
 
 local function get_wire(entity, wire)
