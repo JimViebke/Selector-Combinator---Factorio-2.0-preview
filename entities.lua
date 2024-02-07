@@ -170,180 +170,210 @@ SORTS = {
     function(a, b) return b.count > a.count end
 }
 
-local function inputs_are_unchanged(entry)
-	-- Try to short-circuit if the selector setting is count-inputs or stack-size.
-	-- select-input cannot be handled this way, because it needs to see red and green wires separately
-	local signals = entry.input.get_merged_signals(defines.circuit_connector_id.combinator_input)
-
-	if signals == nil then
-		if #entry.previous_signals == 0 then
-			return true
-		else
-			entry.previous_signals = {}
-			return false
-		end
-	end
-
-	if #signals ~= #entry.previous_signals then
-		entry.previous_signals = {}
-		for i = 1, #signals do
-			entry.previous_signals[i] = { name = signals[i].signal.name }
-		end
-		return false
-	end
-
-	local inputs_match = true
-
-	for i = 1, #signals do
-		local signal = signals[i]
-		if entry.previous_signals[i].name ~= signal.signal.name then
-			entry.previous_signals[i] = { name = signal.signal.name }
-			inputs_match = false
-		end
-	end
-
-	return inputs_match
-end
-
 local function update_single_entry(entry)
-    if not entry.output.valid then
-        return
-    end
+	if not entry.output.valid then
+		return
+	end
 
-    local settings = entry.settings
+	local settings = entry.settings
 
-    -- short circuit for tick
-    if settings.mode == 'random-input' then
-        if settings.update_interval_now then
-            settings.update_interval_now = false
-        elseif game.tick % settings.update_interval_ticks ~= 0 then
-            return
-        end
-    elseif (settings.mode == 'count-inputs' or settings.mode == 'stack-size') and inputs_are_unchanged(entry) then
-        return
-    end
+	-- short circuit for tick
+	if settings.mode == 'random-input' then
+		if settings.update_interval_now then
+			settings.update_interval_now = false
+		elseif game.tick % settings.update_interval_ticks ~= 0 then
+			return
+		end
+	end
 
-    local signals
+	-- Only call get_merged_signals once.
+	-- The only time we don't use get_merged_signals is select-input mode when an index signal is provided.
+	local signals
+	local mode = settings.mode
+	if mode ~= 'select-input' or settings.index_signal == nil then
+		signals = entry.input.get_merged_signals(defines.circuit_connector_id.combinator_input)
 
-    local mode = settings.mode
-    if mode == 'select-input' then
-        -- if a signal is set, read from the green wire.
-        local index = settings.index
-        if settings.index_signal ~= nil then
-            signals = get_wire(entry.input, defines.wire_type.green)
-            if signals == nil then
-                entry.cb.parameters = nil
-                return
-            end
-            local red = get_wire(entry.input, defines.wire_type.red)
-            -- try to find the index signal
-            if red == nil then
-                index = 0
-            else
-                for _, redSig in pairs(red) do
-                    if redSig.signal.type == settings.index_signal.type and redSig.signal.name == settings.index_signal.name then
-                        index = redSig.count
-                        goto found
-                    end
-                end
-                -- not found, assume value is 0
-                index = 0
-                ::found::
-            end
-        else
-            -- otherwise, just read from both wires.
-            -- this may be a bit confusing ... but oh well
-            signals = entry.input.get_merged_signals(defines.circuit_connector_id.combinator_input)
-            if signals == nil then
-                entry.cb.parameters = nil
-                return
-            end
-        end
-        -- if out of range, no need to sort. 
-        if index >= #signals or index < 0 then
-            entry.cb.parameters = nil
-            return
-        end
-        local s = SORTS[1]
-        if not settings.descending then s = SORTS[2] end
-        table.sort(signals, s)
-        local sig = signals[index+1]
-        entry.cb.parameters = {{
-            signal = sig.signal,
-            count = sig.count,
-            index = 1
-        }}
-    elseif mode == 'count-inputs' then
-        signals = entry.input.get_merged_signals(defines.circuit_connector_id.combinator_input)
-        if signals == nil or settings.count_signal == nil then
-            entry.cb.parameters = nil
-        else
-            entry.cb.parameters = {{
-                signal = settings.count_signal,
-                count = #signals,
-                index = 1
-            }}
-        end
-    elseif mode == 'random-input' then
-        signals = entry.input.get_merged_signals(defines.circuit_connector_id.combinator_input)
-        if signals == nil then
-            entry.previous_signals = {}
-            entry.cb.parameters = nil
-            return
-        end
+		-- Replace most "signals == nil" checks with one here.
+		if signals == nil then
+			-- Update outputs if required, then return.
+			if #entry.previous_signals ~= 0 then
+				entry.previous_signals = {}
+				entry.cb.parameters = nil
+			end
+			return
+		end
+	end
 
-        -- if only one signal then output it
-        if #signals == 1 then
-            entry.previous_signals = {{
-                signal = signals[1].signal,
-                count = signals[1].count,
-                index = 1
-            }}
-            entry.cb.parameters = entry.previous_signals
-            return
-        end
+	if mode == 'select-input' then
+		local index
+		if settings.index_signal == nil then
+			-- No index signal was provided, use the index provided in the GUI.
+			index = settings.index
+		else
+			-- An index signal was provided in the GUI. Short-circuit if we don't have any inputs to select from.
+			signals = get_wire(entry.input, defines.wire_type.green)
+			if signals == nil then
+				-- Update outputs if required, then return.
+				if #entry.previous_signals ~= 0 then
+					entry.previous_signals = {}
+					entry.cb.parameters = nil
+				end
+				return
+			end
 
-        -- otherwise, choose a random signal.
-        local signal = signals[global.rng(#signals)]
+			-- The index will be the signal's value on the red wire, or 0 if it can't be found.
+			index = 0
+			local red = get_wire(entry.input, defines.wire_type.red)
+			if red ~= nil then
+				for _, redSig in pairs(red) do
+					if redSig.signal.name == settings.index_signal.name and redSig.signal.type == settings.index_signal.type then
+						index = redSig.count
+						break
+					end
+				end
+			end
+		end
 
-        -- if random_unique is set, do we need to re-run the rng?
-        if settings.random_unique and #entry.previous_signals ~= 0 then
-            local previous = entry.previous_signals[1].signal
-            while signal.signal.name == previous.name and signal.signal.type == previous.type do
-                signal = signals[global.rng(#signals)]
-            end
-        end
-        
-        entry.previous_signals = {{
-            signal = signal.signal,
-            count = signal.count,
-            index = 1
-        }}
-        entry.cb.parameters = entry.previous_signals
-    else
-        -- stack-size
-        signals = entry.input.get_merged_signals(defines.circuit_connector_id.combinator_input)
-        if signals == nil then
-            entry.cb.parameters = nil
-            return
-        end
-        local params = {}
-        local i = 1
-        for _, signal in pairs(signals) do
-            if signal.signal.type == "item" then
-                local item = game.item_prototypes[signal.signal.name]
-                if item ~= nil then
-                    params[i] = {
-                        signal = signal.signal,
-                        count = item.stack_size,
-                        index = i
-                    }
-                    i = i + 1
-                end
-            end
-        end
-        entry.cb.parameters = params
-    end
+		-- If the index is out of range, output nothing.
+		if index >= #signals or index < 0 then
+			-- Only update outputs if required, then return.
+			if #entry.previous_signals ~= 0 then
+				entry.previous_signals = {}
+				entry.cb.parameters = nil
+			end
+			return
+		end
+
+		-- Only sort if we need to.
+		if #signals > 1 then
+			-- TODO: cache the sort predicate, and only update it when the setting changes.
+			local s
+			if settings.descending then s = SORTS[1] else s = SORTS[2] end
+			table.sort(signals, s)
+		end
+
+		local sig = signals[index + 1]
+
+		-- Short-circuit if the output is unchanged.
+		if #entry.previous_signals == 1 then
+			local old_signal = entry.previous_signals[1]
+			if old_signal.count == sig.count and old_signal.signal.name == sig.signal.name and old_signal.signal.type == sig.signal.type then
+				return
+			else -- Update the existing output
+				old_signal.signal.name = sig.signal.name
+				old_signal.signal.type = sig.signal.type
+				old_signal.count = sig.count
+			end
+		else -- Create new output
+			entry.previous_signals = {{
+				signal = sig.signal,
+				count = sig.count,
+				index = 1
+			}}
+		end
+	elseif mode == 'count-inputs' then
+		if settings.count_signal == nil then
+			-- Only update outputs if required, then return.
+			if #entry.previous_signals ~= 0 then
+				entry.previous_signals = {}
+				entry.cb.parameters = nil
+			end
+			return
+		end
+
+		if #entry.previous_signals == 1 then
+			-- Short-circuit if the output is unchanged. Only the count could have changed.
+			if entry.previous_signals[1].count == #signals then
+				return
+			end
+			-- Update existing output.
+			entry.previous_signals[1].count = #signals
+		else
+			-- Create new output.
+			entry.previous_signals = {{
+				signal = settings.count_signal,
+				count = #signals,
+				index = 1
+			}}
+		end
+	elseif mode == 'random-input' then
+		local signal
+		-- If we only have one input, select it.
+		if #signals == 1 then
+			signal = signals[1]
+		else
+			-- Otherwise, choose a random signal.
+			signal = signals[global.rng(#signals)]
+
+			-- if random_unique is set, do we need to re-run the rng?
+			if settings.random_unique and #entry.previous_signals == 1 then
+				local previous = entry.previous_signals[1]
+				while signal.signal.name == previous.signal.name and signal.signal.type == previous.signal.type do
+					signal = signals[global.rng(#signals)]
+				end
+				-- Update the existing output.
+				previous.signal.name = signal.signal.name
+				previous.signal.type = signal.signal.type
+				previous.count = signal.count
+				entry.cb.parameters = entry.previous_signals
+				return
+			end
+		end
+
+		-- If we already have the correct number of outputs (1), check if the signal matches.
+		if #entry.previous_signals == 1 then
+			local previous = entry.previous_signals[1]
+			-- Short-circuit if we are already outputting the selected signal.
+			if signal.count == previous.count and signal.signal.name == previous.signal.name and signal.signal.type == previous.signal.type then
+				return
+			end
+			-- Update the existing output.
+			previous.signal.name = signal.signal.name
+			previous.signal.type = signal.signal.type
+			previous.count = signal.count
+		else -- Otherwise, create new output.
+			entry.previous_signals = {{
+				signal = signal.signal,
+				count = signal.count,
+				index = 1
+			}}
+		end
+	else -- stack-size
+		-- Short-circuit if our inputs are unchanged.
+		-- Any non-item inputs will prevent this from short-circuiting, because the inputs and outputs won't match.
+		local previous_signals = entry.previous_signals
+		if #signals == #previous_signals then
+			local inputs_unchanged = true
+			for i = 1, #signals do
+				if previous_signals[i].signal.name ~= signals[i].signal.name then
+					inputs_unchanged = false
+					break
+				end
+			end
+			if inputs_unchanged then
+				return
+			end
+		end
+
+		entry.previous_signals = {}
+		local i = 1
+		for _, signal in pairs(signals) do
+			if signal.signal.type == "item" then
+				local item = game.item_prototypes[signal.signal.name]
+				if item ~= nil then
+					entry.previous_signals[i] = {
+						signal = signal.signal,
+						count = item.stack_size,
+						index = i
+					}
+					i = i + 1
+				end
+			end
+		end
+	end
+
+	-- If we reach here, our output needs to be updated.
+	entry.cb.parameters = entry.previous_signals
 end
 
 ---@diagnostic disable-next-line: lowercase-global
@@ -372,6 +402,10 @@ function update_selector(entry)
         settings.update_interval_ticks = newInterval
         settings.update_interval_now = true
     end
+
+    -- clear output and internal cache
+    entry.previous_signals = {}
+    entry.cb.parameters = nil
 end
 
 local function update_outputs()
