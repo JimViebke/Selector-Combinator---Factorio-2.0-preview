@@ -46,7 +46,8 @@ local function on_built(e)
         output = output,
         cb = output.get_or_create_control_behavior(),
 
-        previous_signals = {},
+        old_inputs = {},
+        old_outputs = {},
 
         settings = {
             mode = "select-input",
@@ -54,9 +55,9 @@ local function on_built(e)
             index = 0,
             index_signal = nil,
             descending = true,
-    
+
             count_signal = nil,
-    
+
             update_interval = 1,
             update_unit = 'seconds',
             update_interval_ticks = 60,
@@ -171,6 +172,11 @@ SORTS = {
 }
 
 local function update_single_entry(entry)
+	-- To skip logic and updates when possible:
+	-- select-input, count-inputs, random-input, and stack-size cache old_outputs.
+	-- select-input caches old_inputs if the index_signal is nil.
+	-- stack-size caches old_inputs, because any non-item input prevents us from comparing inputs to outputs.
+
 	if not entry.output.valid then
 		return
 	end
@@ -187,7 +193,7 @@ local function update_single_entry(entry)
 	end
 
 	-- Only call get_merged_signals once.
-	-- The only time we don't use get_merged_signals is select-input mode when an index signal is provided.
+	-- The only time we don't use get_merged_signals is when select-input mode has an index signal set in the GUI.
 	local signals
 	local mode = settings.mode
 	if mode ~= 'select-input' or settings.index_signal == nil then
@@ -195,9 +201,10 @@ local function update_single_entry(entry)
 
 		-- Replace most "signals == nil" checks with one here.
 		if signals == nil then
-			-- Update outputs if required, then return.
-			if #entry.previous_signals ~= 0 then
-				entry.previous_signals = {}
+			-- Clear state if required, then return.
+			if #entry.old_outputs ~= 0 then
+				entry.old_inputs = {}
+				entry.old_outputs = {}
 				entry.cb.parameters = nil
 			end
 			return
@@ -207,15 +214,43 @@ local function update_single_entry(entry)
 	if mode == 'select-input' then
 		local index
 		if settings.index_signal == nil then
+			-- Short-circuit if merged inputs have not changed.
+			local old_inputs = entry.old_inputs
+			if #signals == #old_inputs then
+				local inputs_unchanged = true
+				for i = 1, #signals do
+					local sig = signals[i]
+					local old = old_inputs[i]
+					if sig.count ~= old.count or sig.signal.name ~= old.signal.name then
+						-- An input has changed. Update the cache and continue.
+						old.count = sig.count
+						old.signal.name = sig.signal.name
+						old.signal.type = sig.signal.type
+						inputs_unchanged = false
+					end
+				end
+				if inputs_unchanged then
+					return
+				end
+			else
+				-- Cache doesn't match signals, update it.
+				entry.old_inputs = {}
+				for i = 1, #signals do
+					local sig = signals[i]
+					entry.old_inputs[i] = { count = sig.count, signal = sig.signal, index = i }
+				end
+			end
+
 			-- No index signal was provided, use the index provided in the GUI.
 			index = settings.index
 		else
 			-- An index signal was provided in the GUI. Short-circuit if we don't have any inputs to select from.
 			signals = get_wire(entry.input, defines.wire_type.green)
 			if signals == nil then
-				-- Update outputs if required, then return.
-				if #entry.previous_signals ~= 0 then
-					entry.previous_signals = {}
+				-- Clear state if required, then return.
+				if #entry.old_outputs ~= 0 then
+					entry.old_inputs = {}
+					entry.old_outputs = {}
 					entry.cb.parameters = nil
 				end
 				return
@@ -226,7 +261,7 @@ local function update_single_entry(entry)
 			local red = get_wire(entry.input, defines.wire_type.red)
 			if red ~= nil then
 				for _, redSig in pairs(red) do
-					if redSig.signal.name == settings.index_signal.name and redSig.signal.type == settings.index_signal.type then
+					if redSig.signal.name == settings.index_signal.name then
 						index = redSig.count
 						break
 					end
@@ -236,28 +271,52 @@ local function update_single_entry(entry)
 
 		-- If the index is out of range, output nothing.
 		if index >= #signals or index < 0 then
-			-- Only update outputs if required, then return.
-			if #entry.previous_signals ~= 0 then
-				entry.previous_signals = {}
+			-- Clear state if required, then return.
+			if #entry.old_outputs ~= 0 then
+				entry.old_inputs = {}
+				entry.old_outputs = {}
 				entry.cb.parameters = nil
 			end
 			return
 		end
 
-		-- Only sort if we need to.
+		-- Only sort/search if we need to.
+		local sig
 		if #signals > 1 then
-			-- TODO: cache the sort predicate, and only update it when the setting changes.
-			local s
-			if settings.descending then s = SORTS[1] else s = SORTS[2] end
-			table.sort(signals, s)
+			-- Optimize for the common cases of searching for the min or max signal
+			if index == 0 then
+				sig = signals[1]
+				count = sig.count
+				if settings.descending then
+					for _, signal in pairs(signals) do
+						if signal.count > count then
+							sig = signal
+							count = sig.count
+						end
+					end
+				else
+					for _, signal in pairs(signals) do
+						if signal.count < count then
+							sig = signal
+							count = sig.count
+						end
+					end
+				end
+			else
+				-- TODO: cache the sort predicate, and only update it when the setting changes.
+				local s
+				if settings.descending then s = SORTS[1] else s = SORTS[2] end
+				table.sort(signals, s)
+				sig = signals[index + 1]
+			end
+		else
+			sig = signals[1]
 		end
 
-		local sig = signals[index + 1]
-
 		-- Short-circuit if the output is unchanged.
-		if #entry.previous_signals == 1 then
-			local old_signal = entry.previous_signals[1]
-			if old_signal.count == sig.count and old_signal.signal.name == sig.signal.name and old_signal.signal.type == sig.signal.type then
+		if #entry.old_outputs == 1 then
+			local old_signal = entry.old_outputs[1]
+			if old_signal.count == sig.count and old_signal.signal.name == sig.signal.name then
 				return
 			else -- Update the existing output
 				old_signal.signal.name = sig.signal.name
@@ -265,7 +324,7 @@ local function update_single_entry(entry)
 				old_signal.count = sig.count
 			end
 		else -- Create new output
-			entry.previous_signals = {{
+			entry.old_outputs = {{
 				signal = sig.signal,
 				count = sig.count,
 				index = 1
@@ -273,24 +332,24 @@ local function update_single_entry(entry)
 		end
 	elseif mode == 'count-inputs' then
 		if settings.count_signal == nil then
-			-- Only update outputs if required, then return.
-			if #entry.previous_signals ~= 0 then
-				entry.previous_signals = {}
+			-- Clear state if required, then return.
+			if #entry.old_outputs ~= 0 then
+				entry.old_outputs = {}
 				entry.cb.parameters = nil
 			end
 			return
 		end
 
-		if #entry.previous_signals == 1 then
+		if #entry.old_outputs == 1 then
 			-- Short-circuit if the output is unchanged. Only the count could have changed.
-			if entry.previous_signals[1].count == #signals then
+			if entry.old_outputs[1].count == #signals then
 				return
 			end
 			-- Update existing output.
-			entry.previous_signals[1].count = #signals
+			entry.old_outputs[1].count = #signals
 		else
 			-- Create new output.
-			entry.previous_signals = {{
+			entry.old_outputs = {{
 				signal = settings.count_signal,
 				count = #signals,
 				index = 1
@@ -306,33 +365,33 @@ local function update_single_entry(entry)
 			signal = signals[global.rng(#signals)]
 
 			-- if random_unique is set, do we need to re-run the rng?
-			if settings.random_unique and #entry.previous_signals == 1 then
-				local previous = entry.previous_signals[1]
-				while signal.signal.name == previous.signal.name and signal.signal.type == previous.signal.type do
+			if settings.random_unique and #entry.old_outputs == 1 then
+				local old = entry.old_outputs[1]
+				while signal.signal.name == old.signal.name do
 					signal = signals[global.rng(#signals)]
 				end
 				-- Update the existing output.
-				previous.signal.name = signal.signal.name
-				previous.signal.type = signal.signal.type
-				previous.count = signal.count
-				entry.cb.parameters = entry.previous_signals
+				old.signal.name = signal.signal.name
+				old.signal.type = signal.signal.type
+				old.count = signal.count
+				entry.cb.parameters = entry.old_outputs
 				return
 			end
 		end
 
 		-- If we already have the correct number of outputs (1), check if the signal matches.
-		if #entry.previous_signals == 1 then
-			local previous = entry.previous_signals[1]
+		if #entry.old_outputs == 1 then
+			local old = entry.old_outputs[1]
 			-- Short-circuit if we are already outputting the selected signal.
-			if signal.count == previous.count and signal.signal.name == previous.signal.name and signal.signal.type == previous.signal.type then
+			if signal.count == old.count and signal.signal.name == old.signal.name then
 				return
 			end
 			-- Update the existing output.
-			previous.signal.name = signal.signal.name
-			previous.signal.type = signal.signal.type
-			previous.count = signal.count
+			old.signal.name = signal.signal.name
+			old.signal.type = signal.signal.type
+			old.count = signal.count
 		else -- Otherwise, create new output.
-			entry.previous_signals = {{
+			entry.old_outputs = {{
 				signal = signal.signal,
 				count = signal.count,
 				index = 1
@@ -340,28 +399,43 @@ local function update_single_entry(entry)
 		end
 	else -- stack-size
 		-- Short-circuit if our inputs are unchanged.
-		-- Any non-item inputs will prevent this from short-circuiting, because the inputs and outputs won't match.
-		local previous_signals = entry.previous_signals
-		if #signals == #previous_signals then
+		local old_inputs = entry.old_inputs
+		if #signals == #old_inputs then
 			local inputs_unchanged = true
 			for i = 1, #signals do
-				if previous_signals[i].signal.name ~= signals[i].signal.name then
+				if old_inputs[i] ~= signals[i].signal.name then
+					-- Fix the cache.
+					old_inputs[i] = signals[i].signal.name
 					inputs_unchanged = false
-					break
 				end
 			end
+
 			if inputs_unchanged then
 				return
 			end
+		else
+			-- Input cache mismatches; update.
+			-- We don't actually need to completely reset the cache. Try either of:
+				-- Shrink the extra elements until the cache is the same size or smaller than the input, then update all entries
+				-- OR, just take over signals: entry.old_inputs = signals
+			
+			-- For now, just make it work:
+			entry.old_inputs = {}
+			for i = 1, #signals do
+				entry.old_inputs[i] = signals[i].signal.name
+			end
 		end
 
-		entry.previous_signals = {}
+		-- The inputs changed, but this doesn't mean the outputs also have to change.
+		-- We could short-circuit at this point if there are no *item* differences between our inputs and our outputs.
+
+		entry.old_outputs = {}
 		local i = 1
 		for _, signal in pairs(signals) do
 			if signal.signal.type == "item" then
 				local item = game.item_prototypes[signal.signal.name]
 				if item ~= nil then
-					entry.previous_signals[i] = {
+					entry.old_outputs[i] = {
 						signal = signal.signal,
 						count = item.stack_size,
 						index = i
@@ -373,7 +447,7 @@ local function update_single_entry(entry)
 	end
 
 	-- If we reach here, our output needs to be updated.
-	entry.cb.parameters = entry.previous_signals
+	entry.cb.parameters = entry.old_outputs
 end
 
 ---@diagnostic disable-next-line: lowercase-global
@@ -404,7 +478,8 @@ function update_selector(entry)
     end
 
     -- clear output and internal cache
-    entry.previous_signals = {}
+    entry.old_inputs = {}
+    entry.old_outputs = {}
     entry.cb.parameters = nil
 end
 
