@@ -416,9 +416,9 @@ local function update_single_entry(entry)
 		else
 			-- Input cache mismatches; update.
 			-- We don't actually need to completely reset the cache. Try either of:
-				-- Shrink the extra elements until the cache is the same size or smaller than the input, then update all entries
-				-- OR, just take over signals: entry.old_inputs = signals
-			
+				-- Shrink the extra elements until the cache is the same size or smaller than the input, then update all entries, or
+				-- Take over signals: entry.old_inputs = signals
+
 			-- For now, just make it work:
 			entry.old_inputs = {}
 			for i = 1, #signals do
